@@ -1,4 +1,4 @@
-# 文件名: .github/workflows/build-padavan-mi-r4a.yml
+# 文件名: .github/workflows/main.yml (或你的实际文件名，例如 build-padavan-mi-r4a.yml)
 
 name: Build MI-R4A Padavan Firmware (编译小米4A千兆版 Padavan 固件)
 
@@ -25,12 +25,12 @@ env:
   FIRMWARE_OUTPUT_DIR: /opt/images
   # 源码仓库 URL
   PADAVAN_REPO_URL: https://github.com/Bobby-Lang/padavan-4.4.git
-  # 使用的 Ubuntu 版本
-  UBUNTU_VERSION: ubuntu-22.04
+  # 定义 Ubuntu 版本信息，主要用于文档或脚本内部参考 (可选)
+  OS_VERSION_FOR_INFO: ubuntu-22.04 # 避免与 runs-on 混淆
 
 jobs:
   build_firmware:
-    runs-on: ${{ env.UBUNTU_VERSION }}
+    runs-on: ubuntu-22.04 # <--- 直接指定 Ubuntu 版本
     # 仅当触发事件的用户是仓库所有者时运行 (防止 fork 滥用)
     if: github.event.repository.owner.id == github.event.sender.id
 
@@ -42,7 +42,7 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          echo "开始初始化编译环境..."
+          echo "开始初始化编译环境 (系统: ubuntu-22.04)..." # 可以硬编码或引用 OS_VERSION_FOR_INFO
           set -eo pipefail # 如果任何命令失败，立即退出，并传递管道错误
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
@@ -202,9 +202,6 @@ jobs:
             echo "$found_files"
             
             # 移动找到的文件
-            # 注意：如果 build_firmware_modify 已经创建了与 TARGET_PROFILE 同名的子目录并放入其中，
-            # 这里的 mv 可能会将整个子目录移动过去，或者你需要更精细的控制。
-            # 为简单起见，这里直接移动找到的文件。
             echo "$found_files" | xargs -I {} sudo mv -v {} ${{ env.FIRMWARE_OUTPUT_DIR }}/
             
             echo "固件文件已尝试移动到 ${{ env.FIRMWARE_OUTPUT_DIR }}。"
