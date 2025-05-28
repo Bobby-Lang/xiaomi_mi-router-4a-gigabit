@@ -2,9 +2,13 @@
 编译固件，通过互联网查找资料，收集整理，测试，让固件编译真实可用；
 
 环境变量 (env)：
+
 TARGET_PROFILE: 设置为你的路由器型号，这里是 MI-R4A。
+
 PADAVAN_DIR, FIRMWARE_OUTPUT_DIR: 定义了源码和输出固件的路径，方便管理。
+
 PADAVAN_REPO_URL: 指定了 Padavan 源码仓库
+
 
 步骤分解：
 1. Checkout Workflow Code: 获取你仓库中包含此 workflow 文件的代码。
