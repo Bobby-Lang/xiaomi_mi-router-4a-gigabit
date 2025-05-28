@@ -1,0 +1,240 @@
+# 文件名: .github/workflows/build-padavan-mi-r4a.yml
+
+name: Build MI-R4A Padavan Firmware (编译小米4A千兆版 Padavan 固件)
+
+on:
+  # 手动触发编译
+  workflow_dispatch:
+    inputs:
+      build_comment:
+        description: '编译备注 (可选)'
+        required: false
+        default: '手动触发编译'
+  # 当推送到以 "v" 开头的标签时触发 (例如 v1.0, v2023.10.27)
+  push:
+    tags:
+      - 'v*'
+  # 也可以在这里添加 schedule 定时触发等
+
+env:
+  # 目标型号名称，与 configs/templates/ 目录下的文件名对应
+  TARGET_PROFILE: MI-R4A
+  # Padavan 源码克隆路径
+  PADAVAN_DIR: /opt/rt-n56u
+  # 最终固件存放路径
+  FIRMWARE_OUTPUT_DIR: /opt/images
+  # 源码仓库 URL
+  PADAVAN_REPO_URL: https://github.com/Bobby-Lang/padavan-4.4.git
+  # 使用的 Ubuntu 版本
+  UBUNTU_VERSION: ubuntu-22.04
+
+jobs:
+  build_firmware:
+    runs-on: ${{ env.UBUNTU_VERSION }}
+    # 仅当触发事件的用户是仓库所有者时运行 (防止 fork 滥用)
+    if: github.event.repository.owner.id == github.event.sender.id
+
+    steps:
+      - name: 1. Checkout Workflow Code (检出当前工作流仓库代码)
+        uses: actions/checkout@v4
+
+      - name: 2. Initialize Build Environment (初始化编译环境)
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          echo "开始初始化编译环境..."
+          set -eo pipefail # 如果任何命令失败，立即退出，并传递管道错误
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison quilt libssl-dev libncurses5-dev zlib1g-dev \
+            gawk gettext automake autopoint texinfo libtool-bin pkg-config \
+            git python3-docutils cpio unzip libgmp3-dev libmpc-dev libmpfr-dev \
+            nano xxd fakeroot curl cmake gperf wget
+          echo "编译环境初始化完毕。"
+
+      - name: 3. Clone Padavan Source Code (克隆 Padavan 源码)
+        run: |
+          echo "开始克隆 Padavan 源码从 ${{ env.PADAVAN_REPO_URL }}..."
+          set -eo pipefail
+          if ! git clone --depth=1 ${{ env.PADAVAN_REPO_URL }} ${{ env.PADAVAN_DIR }}; then
+            echo "::error::克隆 Padavan 源码失败。"
+            exit 1
+          fi
+          echo "Padavan 源码克隆完毕到 ${{ env.PADAVAN_DIR }}。"
+          # 确保目标输出目录存在
+          sudo mkdir -p ${{ env.FIRMWARE_OUTPUT_DIR }}
+          sudo chmod 777 ${{ env.FIRMWARE_OUTPUT_DIR }} # 确保后续步骤有权限写入
+
+      - name: 4. Download Toolchain (下载交叉编译工具链)
+        working-directory: ${{ env.PADAVAN_DIR }}/toolchain-mipsel
+        run: |
+          echo "开始下载交叉编译工具链..."
+          set -eo pipefail
+          if ! sh dl_toolchain.sh; then
+            echo "::error::下载交叉编译工具链失败。"
+            exit 1
+          fi
+          echo "交叉编译工具链下载完毕。"
+
+      - name: 5. Prepare Firmware Configuration (准备固件配置文件)
+        working-directory: ${{ env.PADAVAN_DIR }}/trunk
+        run: |
+          echo "开始准备固件配置文件..."
+          set -eo pipefail
+
+          # 检查模板配置文件是否存在
+          if [ ! -f "configs/templates/${{ env.TARGET_PROFILE }}.config" ]; then
+            echo "::error::目标型号 '${{ env.TARGET_PROFILE }}' 的模板配置文件 'configs/templates/${{ env.TARGET_PROFILE }}.config' 未找到！"
+            exit 1
+          fi
+          cp -f "configs/templates/${{ env.TARGET_PROFILE }}.config" .config
+          echo "已从模板复制配置文件。"
+
+          # 定义一个函数来安全地更新 .config 选项
+          update_config_option() {
+              local key="$1"
+              local value="$2"
+              local config_file=".config"
+              # 先删除可能已存在的行 (无论是激活的还是 # KEY is not set 形式)
+              sed -i "/^# ${key} is not set$/d" "${config_file}"
+              sed -i "/^${key}=.*/d" "${config_file}"
+              # 追加新的键值对
+              echo "${key}=${value}" >> "${config_file}"
+              echo "配置项更新: ${key}=${value}"
+          }
+
+          # --- 开始自定义配置 ---
+          # 基础功能
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_OPENSSL_EXE" "y"
+
+          # 先禁用一些可能在模板中默认开启的、但我们想精确控制的选项
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_DNSFORWARDER" "n"
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_MENTOHUST" "n"
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_SCUTCLIENT" "n"
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_SRELAY" "n"
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS" "n" # 稍后会按需启用
+
+          # 网络工具 & 科学上网
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS" "y" # Shadowsocks 插件
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_XRAY" "n"       # Xray (~4.5M)
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_V2RAY" "n"      # V2ray
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_TROJAN" "n"     # Trojan (~1.2M)
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_SSOBFS" "n"     # simple-obfs 混淆
+
+          # 广告过滤
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_ADBYBY" "y"      # Adbyby Plus+
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_ADGUARDHOME" "y" # AdGuard Home (注意：此版本较大，如果空间紧张可考虑禁用)
+
+          # DNS 服务
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_SMARTDNS" "n"    # SmartDNS
+          # 注意: AdGuardHome (如果启用) 也可以作为DNS服务器。如果两者都启用，需在路由器上手动配置。
+
+          # DDNS & 内网穿透
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_ZEROTIER" "n"    # Zerotier (~1.3M)
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_ALIDDNS" "n"     # AliDDNS
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_DDNSTO" "n"      # DDNS.to (~0.5M)
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_DDNSGO" "n"      # DDNS-Go
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_WIREGUARD" "n"   # WireGuard VPN
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_CLOUDFLARE" "y"  # Cloudflare DDNS
+
+          # 其他网络服务
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_ALDRIVER" "n"   # 阿里云盘 WebDAV (~3M)
+          # update_config_option "CONFIG_FIRMWARE_INCLUDE_MENTOHUST" "n" # MentoHUST (上面已设为n，这里可按需调整)
+
+          # 文件服务
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_FTPD" "n"       # FTP 服务
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_ALIST" "y"      # Alist 文件列表 (~10MB, 较大)
+
+          # QoS
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_SQM" "n"        # SQM QoS
+
+          # CPU 超频 (MT7621) - 请谨慎使用，确认参数正确！
+          update_config_option "CONFIG_FIRMWARE_INCLUDE_OC" "y"               # 启用超频支持
+          update_config_option "CONFIG_FIRMWARE_MT7621_OC" "0x3B2" # 1200MHz示例 (946 Decimal = 0x3B2 Hex)
+                                                                   # 1000MHz=0x312, 1100MHz=0x362
+          # --- 结束自定义配置 ---
+
+          echo "最终 .config 文件内容如下 (部分):"
+          head -n 50 .config && tail -n 50 .config
+          echo "固件配置文件准备完毕。"
+
+      - name: 6. Build Firmware (编译固件)
+        working-directory: ${{ env.PADAVAN_DIR }}/trunk
+        run: |
+          echo "开始编译固件 (型号: ${{ env.TARGET_PROFILE }})..."
+          set -eo pipefail
+          
+          sudo ./clear_tree # 清理旧的编译产物
+          echo "执行编译脚本: sudo ./build_firmware_modify ${{ env.TARGET_PROFILE }} 0"
+          if ! sudo ./build_firmware_modify ${{ env.TARGET_PROFILE }} 0; then
+            echo "::error::固件编译脚本 (build_firmware_modify) 执行失败。"
+            exit 1
+          fi
+          echo "编译脚本执行完毕。"
+
+          # --- 查找并移动固件文件 ---
+          echo "正在查找编译生成的固件文件..."
+          # 首先检查 build_firmware_modify 是否已将文件放入 ${{ env.FIRMWARE_OUTPUT_DIR }}
+          found_in_output_dir=$(sudo ls -1 ${{ env.FIRMWARE_OUTPUT_DIR }}/*.bin ${{ env.FIRMWARE_OUTPUT_DIR }}/*.trx ${{ env.FIRMWARE_OUTPUT_DIR }}/*.img 2>/dev/null | wc -l)
+
+          if [ "${found_in_output_dir}" -gt 0 ]; then
+            echo "在最终输出目录 (${{ env.FIRMWARE_OUTPUT_DIR }}) 中已找到固件。"
+            sudo ls -lh ${{ env.FIRMWARE_OUTPUT_DIR }}/
+          else
+            echo "最终输出目录未找到固件，尝试从 build_firmware_modify 的默认输出位置 (images/) 移动..."
+            # Padavan 通常将固件输出到 trunk/images/ 目录
+            # 使用 find 查找 .bin, .trx, .img 文件，并移动到 FIRMWARE_OUTPUT_DIR
+            # -maxdepth 2 限制在 images/ 和其下一级子目录查找，避免意外匹配
+            found_files=$(sudo find images/ -maxdepth 2 -type f \( -name "*.bin" -o -name "*.trx" -o -name "*.img" \) -print)
+
+            if [ -z "$found_files" ]; then
+              echo "::error::在 'images/' 目录及其子目录中未找到任何 .bin, .trx, 或 .img 固件文件。"
+              echo "列出 'images/' 目录内容:"
+              sudo ls -lR images/
+              echo "列出 '${{ env.FIRMWARE_OUTPUT_DIR }}' 目录内容:"
+              sudo ls -lR ${{ env.FIRMWARE_OUTPUT_DIR }}/
+              echo "尝试在整个编译目录中搜索:"
+              sudo find . -name "*.bin" -o -name "*.trx" -o -name "*.img" -print -exec ls -l {} \;
+              exit 1
+            fi
+
+            echo "找到以下固件文件准备移动:"
+            echo "$found_files"
+            
+            # 移动找到的文件
+            # 注意：如果 build_firmware_modify 已经创建了与 TARGET_PROFILE 同名的子目录并放入其中，
+            # 这里的 mv 可能会将整个子目录移动过去，或者你需要更精细的控制。
+            # 为简单起见，这里直接移动找到的文件。
+            echo "$found_files" | xargs -I {} sudo mv -v {} ${{ env.FIRMWARE_OUTPUT_DIR }}/
+            
+            echo "固件文件已尝试移动到 ${{ env.FIRMWARE_OUTPUT_DIR }}。"
+            echo "列出最终输出目录 (${{ env.FIRMWARE_OUTPUT_DIR }}) 内容:"
+            sudo ls -lh ${{ env.FIRMWARE_OUTPUT_DIR }}/
+          fi
+          
+          # 再次确认最终输出目录有文件
+          final_file_count=$(sudo ls -1 ${{ env.FIRMWARE_OUTPUT_DIR }}/*.bin ${{ env.FIRMWARE_OUTPUT_DIR }}/*.trx ${{ env.FIRMWARE_OUTPUT_DIR }}/*.img 2>/dev/null | wc -l)
+          if [ "${final_file_count}" -eq 0 ]; then
+             echo "::error::最终在输出目录 (${{ env.FIRMWARE_OUTPUT_DIR }}) 未找到任何固件文件！请检查编译日志和脚本。"
+             exit 1
+          fi
+          echo "固件编译和整理完毕。"
+
+      - name: 7. Upload Firmware Artifact (上传固件产物)
+        uses: actions/upload-artifact@v4
+        if: always() # 无论前面步骤成功与否，总是尝试上传 (便于获取日志或部分产物)
+        with:
+          name: Padavan-Firmware-${{ env.TARGET_PROFILE }}-${{ github.run_id }}
+          path: ${{ env.FIRMWARE_OUTPUT_DIR }}/*.bin # 主要上传 .bin，如果需要其他格式也加入
+          # path: |
+          #  ${{ env.FIRMWARE_OUTPUT_DIR }}/*.bin
+          #  ${{ env.FIRMWARE_OUTPUT_DIR }}/*.trx
+          #  ${{ env.FIRMWARE_OUTPUT_DIR }}/config.txt # 如果有配置文件也想上传
+          retention-days: 7 # 产物保留天数
+
+      - name: 8. Clean up build directory (清理编译目录以释放空间 - 可选)
+        if: always() # 无论成功与否都执行
+        run: |
+          echo "开始清理编译目录 ${{ env.PADAVAN_DIR }}..."
+          sudo rm -rf ${{ env.PADAVAN_DIR }}
+          echo "编译目录清理完毕。"
